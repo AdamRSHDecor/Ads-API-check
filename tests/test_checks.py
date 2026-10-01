@@ -122,6 +122,22 @@ class ChecksTest(unittest.TestCase):
         record = self.run_with(flaky)
         self.assertEqual(record["overall"], "PASS")
 
+    def test_saved_profile_id_text_still_finds_campaigns(self):
+        # Profile ID from the form/.env is a string; Amazon returns it as a number.
+        record = self.run_with(FakeAmazon(), cfg={**CFG, "AMAZON_ADS_PROFILE_ID": "111"},
+                               profile_id="111", report=True, write_test=True)
+        s = self.statuses(record)
+        self.assertEqual(s["Edit access (no-op write)"], "PASS", record)
+        self.assertEqual(s["Performance metrics report"], "PASS", record)
+
+    def test_report_works_without_timezone_database(self):
+        # Stock Windows Python has no IANA time-zone data.
+        def missing(name):
+            raise ads.ZoneInfoNotFoundError(name)
+        with mock.patch.object(ads, "ZoneInfo", missing):
+            record = self.run_with(FakeAmazon(), report=True)
+        self.assertEqual(self.statuses(record)["Performance metrics report"], "PASS", record)
+
 
 class ConfigTest(unittest.TestCase):
     def test_save_and_load_roundtrip(self):
@@ -132,6 +148,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg["AMAZON_ADS_CLIENT_ID"], "abc")
         self.assertEqual(cfg["AMAZON_ADS_REGION"], "EU")
         self.assertEqual(oct(tmp.stat().st_mode & 0o777), "0o600")
+
+
+
+class WebJobTest(unittest.TestCase):
+    def test_crash_is_shown_not_blank(self):
+        import check
+        with mock.patch.object(ads, "run_checks", side_effect=RuntimeError("boom")), \
+             mock.patch("traceback.print_exc"):
+            check.start_job(dict(CFG), True, False)
+            check.JOB["thread"].join()
+        self.assertIn("RuntimeError: boom", check.render_job())
 
 
 if __name__ == "__main__":

@@ -10,9 +10,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = Path(__file__).resolve().parent
 ENV_PATH = HERE / ".env"
@@ -330,7 +330,7 @@ def run_checks(cfg, profile_id=None, report=False, write_test=False, log=print):
             continue
         any_ok = True
         camps = data.get("campaigns", [])
-        campaigns_by_profile[pid] = camps
+        campaigns_by_profile[str(pid)] = camps
         states = {}
         for c in camps:
             states[c.get("state", "?")] = states.get(c.get("state", "?"), 0) + 1
@@ -350,7 +350,7 @@ def run_checks(cfg, profile_id=None, report=False, write_test=False, log=print):
         add(
             f"Live campaigns - {label}",
             "PASS" if camps else "WARN",
-            f"{total} Sponsored Products campaign(s) ({state_txt})." if camps
+            f"{total} Sponsored Products campaign(s). First {len(camps)} returned: {state_txt}." if camps
             else "Access OK but this profile has no Sponsored Products campaigns.",
             {"campaigns": sample},
         )
@@ -358,7 +358,7 @@ def run_checks(cfg, profile_id=None, report=False, write_test=False, log=print):
         return finish(results, cfg)
 
     # Pick the profile for the deeper checks: configured one, else first with campaigns.
-    chosen = profile_id or next((pid for pid, c in campaigns_by_profile.items() if c), None)
+    chosen = str(profile_id) if profile_id else next((pid for pid, c in campaigns_by_profile.items() if c), None)
     chosen_profile = next((s for s in summary if str(s["profileId"]) == str(chosen)), None)
 
     # 5. Performance report (optional)
@@ -386,10 +386,18 @@ def run_checks(cfg, profile_id=None, report=False, write_test=False, log=print):
     return finish(results, cfg)
 
 
+def profile_today(tz_name):
+    """Today's date in the profile's time zone; falls back to this computer's date when
+    the time-zone database is missing (stock Windows Python has none)."""
+    try:
+        return datetime.now(ZoneInfo(tz_name or "UTC")).date()
+    except (ZoneInfoNotFoundError, ValueError):
+        return date.today()
+
+
 def run_report(client, profile, log=print, days=7, max_wait=600):
     pid = profile["profileId"]
-    tz = ZoneInfo(profile.get("timezone") or "UTC")
-    end = datetime.now(tz).date() - timedelta(days=1)
+    end = profile_today(profile.get("timezone")) - timedelta(days=1)
     start = end - timedelta(days=days - 1)
     body = {
         "name": f"ads-api-check {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}",

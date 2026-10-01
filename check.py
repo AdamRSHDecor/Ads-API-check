@@ -10,6 +10,7 @@ import html
 import json
 import sys
 import threading
+import traceback
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,7 @@ import amazon_ads as ads
 
 HOST, PORT = "127.0.0.1", 8765
 STATE = {"oauth_state": None}
+JOB = {"thread": None, "log": [], "error": None}
 
 STYLE = """
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#5d6675;--line:#dde1e7;--accent:#ff9900;
@@ -48,8 +50,9 @@ def esc(v):
     return html.escape(str(v if v is not None else ""))
 
 
-def page(body):
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+def page(body, refresh=False):
+    meta = '<meta http-equiv="refresh" content="3">' if refresh else ""
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">{meta}
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Ads API Check</title>
 <style>{STYLE}</style></head><body><main>{body}</main></body></html>"""
 
@@ -72,9 +75,40 @@ def render_results(record):
 <div class="banner {overall}">{overall}: {msg}</div><table>{''.join(rows)}</table></div>"""
 
 
-def home(message="", record=None):
+def job_running():
+    return JOB["thread"] is not None and JOB["thread"].is_alive()
+
+
+def start_job(cfg, report, write_test):
+    def work():
+        try:
+            ads.run_checks(cfg, profile_id=cfg["AMAZON_ADS_PROFILE_ID"] or None,
+                           report=report, write_test=write_test, log=JOB["log"].append)
+        except Exception as e:  # show any unexpected crash on the page instead of a blank screen
+            traceback.print_exc()
+            JOB["error"] = f"{type(e).__name__}: {e}"
+
+    JOB.update(log=[], error=None, thread=threading.Thread(target=work, daemon=True))
+    JOB["thread"].start()
+
+
+def render_job():
+    if not JOB["thread"]:
+        return ""
+    log = esc("\n".join(JOB["log"]))
+    if job_running():
+        return f"""<div class="card"><h2>Running checks...</h2><p class="muted">This page refreshes by itself.
+The 7-day report can take 1-5 minutes while Amazon builds it.</p><pre>{log}</pre></div>"""
+    if JOB["error"]:
+        return f"""<div class="card"><div class="banner FAIL">Unexpected error: {esc(JOB['error'])}</div>
+<p class="muted">Copy this message to Claude.</p><pre>{log}</pre></div>"""
+    return ""
+
+
+def home(message=""):
     cfg = ads.load_config()
-    if record is None and ads.LAST_CHECK_PATH.exists():
+    record = None
+    if ads.LAST_CHECK_PATH.exists() and not job_running() and not JOB["error"]:
         record = json.loads(ads.LAST_CHECK_PATH.read_text())
 
     def field(key, label, help_text, secret=False):
@@ -121,9 +155,10 @@ Advertising Console.</p>{signin}</div>
 <h2>3. Run the checks</h2>
 <label class="inline"><input type="checkbox" name="report">Also pull last 7 days of spend / clicks / sales (takes 1-5 min)</label>
 <label class="inline"><input type="checkbox" name="write_test">Also test edit access (re-saves one campaign's state with its current value - changes nothing)</label>
-<button>Run checks</button></form>
+<button {'disabled' if job_running() else ''}>Run checks</button></form>
+{render_job()}
 {render_results(record)}
-""")
+""", refresh=job_running())
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -181,14 +216,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/?msg=Saved.")
         if self.path == "/run":
             data = self.form()
-            cfg = ads.load_config()
-            record = ads.run_checks(
-                cfg,
-                profile_id=cfg["AMAZON_ADS_PROFILE_ID"] or None,
-                report="report" in data,
-                write_test="write_test" in data,
-            )
-            return self.send_html(home(record=record))
+            if not job_running():
+                start_job(ads.load_config(), "report" in data, "write_test" in data)
+            return self.redirect("/")
         self.send_html(page("<p>Not found.</p>"), 404)
 
 
